@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>西西弗斯的神迹 | Sisyphus Ascent</title>
+    <link rel="stylesheet" href="https://lf26-cdn-tos.bytecdntp.com/cdn/expire_1-y/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        :root {
+            --bg-dark: #1a1a2e;
+            --cyber-blue: #00f3ff;
+            --text-main: #fff;
+        }
+        body, html { margin: 0; padding: 0; height: 100%; background-color: var(--bg-dark); color: var(--text-main); font-family: 'Courier New', Courier, monospace; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        
+        /* 游戏画布：泛发光卡片质感 */
+        #game-canvas {
+            border: 4px solid var(--cyber-blue);
+            box-shadow: 0 0 30px rgba(0, 243, 255, 0.5);
+            background-color: #000;
+            cursor: none; /* 隐藏鼠标，沉浸体验 */
+        }
+
+        /* 游戏 UI 区 */
+        .game-ui { text-align: center; margin-top: 20px; max-width: 600px; }
+        h1 { font-size: 1.8rem; text-shadow: 0 0 10px var(--cyber-blue); margin-bottom: 10px; }
+        .controls { font-size: 1.1rem; color: #8892b0; margin-bottom: 20px; }
+        .kbd-btn { display: inline-block; padding: 5px 12px; border: 2px solid var(--cyber-blue); border-radius: 6px; font-weight: bold; color: var(--cyber-blue); }
+        .stamina-container { width: 300px; height: 10px; border: 2px solid var(--cyber-blue); margin: 0 auto 20px auto; overflow: hidden; }
+        #stamina-bar { width: 100%; height: 100%; background-color: var(--cyber-blue); transition: width 0.1s; }
+        .stats { font-size: 1.2rem; font-weight: bold; display: flex; gap: 30px; justify-content: center; }
+    </style>
+</head>
+<body>
+
+    <h1 class="logo"><i class="fas fa-meteor"></i> SISYPHUS_ASCENT_V1.0</h1>
+    <div class="stamina-container">
+        <div id="stamina-bar"></div>
+    </div>
+
+    <canvas id="game-canvas" width="600" height="400"></canvas>
+
+    <div class="game-ui">
+        <div class="controls">
+            长按 <kbd class="kbd-btn">→ / D</kbd> 或按住鼠标 <i class="fas fa-mouse"></i> 左键，开始推石头。
+        </div>
+        <div class="stats">
+            <div><i class="fas fa-sync-alt"></i> 推石头次数 (Cycles): <span id="val-cycles" style="color: var(--cyber-blue)">0</span></div>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        const staminaBar = document.getElementById('stamina-bar');
+        const cyclesEl = document.getElementById('val-cycles');
+
+        // 核心配置 (像素单位)
+        const PIXEL_SCALE = 4; // 1个游戏像素 = 4个屏幕像素
+        const GAME_WIDTH = canvas.width / PIXEL_SCALE;
+        const GAME_HEIGHT = canvas.height / PIXEL_SCALE;
+
+        // 游戏状态变量
+        let cycles = 0;
+        let stamina = 100; // 体力值
+        let isPushing = false;
+        let isRollingBack = false;
+        
+        // --- 1. 物理引擎与状态管理 ---
+        // 西西弗斯的状态
+        let sisyphus = {
+            x: GAME_WIDTH * 0.1,
+            y: GAME_HEIGHT - 6,
+            frame: 0
+        };
+
+        // 石头的状态
+        let boulder = {
+            x: sisyphus.x + 8,
+            y: GAME_HEIGHT - 6,
+            radius: 5
+        };
+
+        // 动画常数
+        const PUSH_FORCE = 0.5; // 体力充足时的推石头速度
+        const ROLLBACK_SPEED = 6; // 石头滚回的速度
+        const HILL_SLOPE = 0.3; // 山坡斜率 (y = HILL_SLOPE * x)
+
+        // 输入处理
+        let keys = {};
+        let mouseHold = false;
+        window.addEventListener('keydown', e => { keys[e.key] = true; });
+        window.addEventListener('keyup', e => { keys[e.key] = false; });
+        canvas.addEventListener('mousedown', () => { mouseHold = true; });
+        canvas.addEventListener('mouseup', () => { mouseHold = false; });
+        canvas.addEventListener('mouseleave', () => { mouseHold = false; });
+
+        // 根据 x 坐标计算山坡 y 坐标
+        function getHillY(x) {
+            // 越往右，y越小 (山越高)
+            return GAME_HEIGHT - 6 - (x * HILL_SLOPE);
+        }
+
+        // --- 2. 核心像素绘制引擎 ---
+        // 像素绘图工具函数
+        function drawPixelRect(x, y, w, h, color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x * PIXEL_SCALE, y * PIXEL_SCALE, w * PIXEL_SCALE, h * PIXEL_SCALE);
+        }
+
+        function drawPixelCircle(px, py, radius, color) {
+            ctx.fillStyle = color;
+            for(let y = -radius; y <= radius; y++) {
+                for(let x = -radius; x <= radius; x++) {
+                    if(x*x + y*y <= radius*radius) {
+                        ctx.fillRect((px + x) * PIXEL_SCALE, (py + y) * PIXEL_SCALE, PIXEL_SCALE, PIXEL_SCALE);
+                    }
+                }
+            }
+        }
+
+        // 绘制西西弗斯 (根据帧进行动画移动)
+        function drawSisyphus() {
+            let cx = sisyphus.x;
+            let cy = getHillY(cx) - 1; // 身体站在坡上
+            let frame = Math.floor(sisyphus.frame / 10) % 2;
+
+            // 身体
+            drawPixelRect(cx, cy - 2, 2, 2, "#fff"); // 头
+            drawPixelRect(cx - 1, cy - 1, 4, 3, "#fff"); // 身
+            
+            // 手 (根据石头位置动态弯曲)
+            drawPixelRect(cx + 3, cy - 1, 2, 1, "#fff"); // 推石头的臂
+
+            // 腿动画
+            if(frame === 0) {
+                drawPixelRect(cx, cy + 2, 1, 2, "#fff"); // 左腿
+                drawPixelRect(cx + 2, cy + 1, 1, 2, "#fff"); // 右腿弯曲
+            } else {
+                drawPixelRect(cx - 1, cy + 1, 1, 2, "#fff"); // 左腿弯曲
+                drawPixelRect(cx + 1, cy + 2, 1, 2, "#fff"); // 右腿
+            }
+
+            // 只有当体力不支或石头滚回时显示汗滴特效 (cyber-blue色像素)
+            if(stamina < 30 && !isRollingBack) {
+                drawPixelRect(cx + 1, cy - 4, 1, 1, "#00f3ff");
+                drawPixelRect(cx - 2, cy - 3, 1, 1, "#00f3ff");
+            }
+        }
+
+        // 绘制石头 (根据 x 坐标计算在斜坡上的 y 坐标)
+        function drawBoulder() {
+            drawPixelCircle(boulder.x, getHillY(boulder.x) - boulder.radius, boulder.radius, "#8892b0");
+            // 石头上的纹理
+            drawPixelRect(boulder.x - 2, getHillY(boulder.x) - boulder.radius - 1, 2, 2, "#444");
+        }
+
+        // 绘制山坡背景
+        function drawBackground() {
+            // 背景渐变
+            let gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#0a0a20');
+            gradient.addColorStop(1, '#000');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 远处的山脉 (深色像素块)
+            drawPixelRect(0, GAME_HEIGHT - 10, GAME_WIDTH, 10, "#111");
+
+            // 赛博风格的星空
+            for(let i=0; i<15; i++) {
+                drawPixelRect(10 + i * 15, 10 + (i*7)%30, 1, 1, "rgba(0, 243, 255, 0.3)");
+            }
+        }
+
+        // 绘制系统 UI (非Canvas)
+        function updateUI() {
+            staminaBar.style.width = stamina + '%';
+            if(stamina < 30) {
+                staminaBar.style.backgroundColor = '#ff003c';
+            } else {
+                staminaBar.style.backgroundColor = '#00f3ff';
+            }
+            cyclesEl.innerText = cycles;
+        }
+
+        // --- 3. 游戏核心循环引擎 ---
+        function gameLoop() {
+            drawBackground();
+            
+            // 检测是否正在滚回
+            if(isRollingBack) {
+                boulder.x -= ROLLBACK_SPEED;
+                if(boulder.x <= sisyphus.x + 8) {
+                    boulder.x = sisyphus.x + 8;
+                    isRollingBack = false;
+                }
+            } else {
+                // 检测输入
+                if ((keys['ArrowRight'] || keys['d'] || mouseHold) && stamina > 5) {
+                    isPushing = true;
+                } else {
+                    isPushing = false;
+                }
+
+                // 物理计算
+                if(isPushing) {
+                    boulder.x += PUSH_FORCE;
+                    sisyphus.x += PUSH_FORCE;
+                    sisyphus.frame++;
+                    stamina -= 0.3; // 消耗体力
+
+                    // 体力枯竭检测
+                    if(stamina <= 5) {
+                        isPushing = false;
+                        isRollingBack = true;
+                        cycles++; // 记为一次循环 (失败也是循环)
+                    }
+
+                    // 胜利检测 (到达顶峰，即地图右侧)
+                    if(boulder.x + boulder.radius >= GAME_WIDTH - 5) {
+                        isPushing = false;
+                        // 这里是荒诞的关键点：胜利的一瞬间，石头自动滚回初始点
+                        setTimeout(() => {
+                            isRollingBack = true;
+                            cycles++;
+                        }, 500); // 在山顶停留0.5秒享受荒诞的胜利
+                    }
+                } else {
+                    // 不推时，体力极其缓慢回复
+                    if(stamina < 100) stamina += 0.1;
+                }
+            }
+
+            drawSisyphus();
+            drawBoulder();
+            updateUI();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // 启动游戏引擎
+        gameLoop();
+    </script>
+</body>
+</html>
