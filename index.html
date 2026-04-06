@@ -3,34 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>田园西西弗斯 | Zen Sisyphus</title>
+    <title>星露谷风：西西弗斯田园纪</title>
     <style>
         body, html {
             margin: 0; padding: 0; width: 100%; height: 100%;
             background-color: #87CEEB; overflow: hidden;
             font-family: "Courier New", Courier, monospace;
+            user-select: none;
         }
+        /* 强制开启像素画原汁原味渲染，拒绝模糊 */
         canvas {
             display: block; width: 100vw; height: 100vh;
-            /* 强制无平滑缩放，保留原汁原味的像素感 */
             image-rendering: -moz-crisp-edges;
             image-rendering: -webkit-crisp-edges;
             image-rendering: pixelated;
             image-rendering: crisp-edges;
+            cursor: none; /* 隐藏鼠标，沉浸体验 */
         }
         #ui-layer {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             pointer-events: none; display: flex; flex-direction: column;
-            justify-content: space-between; padding: 20px; box-sizing: border-box;
+            justify-content: flex-end; align-items: center; padding-bottom: 40px;
         }
         .quote {
-            text-align: center; color: #fff; font-size: 1.2rem; font-weight: bold;
-            text-shadow: 1px 1px 0 #555, -1px -1px 0 #555, 1px -1px 0 #555, -1px 1px 0 #555;
-            letter-spacing: 2px; margin-bottom: 20px;
-        }
-        .controls-hint {
-            position: absolute; bottom: 60px; width: 100%; text-align: center;
-            color: rgba(255,255,255,0.8); font-size: 0.9rem; text-shadow: 1px 1px 2px #000;
+            color: rgba(255,255,255,0.9); font-size: 1rem; font-weight: bold;
+            text-shadow: 1px 1px 0 #5c4a3d, -1px -1px 0 #5c4a3d, 1px -1px 0 #5c4a3d, -1px 1px 0 #5c4a3d;
+            letter-spacing: 2px;
         }
     </style>
 </head>
@@ -39,266 +37,358 @@
     <canvas id="gameCanvas"></canvas>
     
     <div id="ui-layer">
-        <div></div> <div class="controls-hint">长按 W 键、↑ 键 或 屏幕，推动巨石。</div>
-        <div class="quote" id="quote-text">“石头会落下，但野花年年开。”</div>
+        <div class="quote" id="quote-text">石头会落下，但野花年年开。</div>
     </div>
 
 <script>
-    // --- 1. 画布与离屏渲染设置 ---
+    /** * 星露谷风格渲染引擎与物理核心
+     */
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     
-    // 离屏缓冲区 (固定低分辨率 640x360)，以此制造像素风
+    // 采用 800x450 的宽屏低分辨率进行离屏渲染，放大后产生精致的 32x32 像素感
+    const VW = 800; const VH = 450;
     const buffer = document.createElement('canvas');
-    buffer.width = 640; buffer.height = 360;
+    buffer.width = VW; buffer.height = VH;
     const bctx = buffer.getContext('2d');
 
     function resize() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
-        ctx.imageSmoothingEnabled = false; // 关闭抗锯齿
+        ctx.imageSmoothingEnabled = false;
     }
     window.addEventListener('resize', resize);
     resize();
 
-    // --- 2. 调色板与物理参数 ---
-    const COLORS = {
-        skyTop: '#87CEEB', skyBot: '#FFDAB9',
-        hillBack: '#9ACD32', hillFront: '#6B8E23',
-        slope: '#228B22', slopeDirt: '#8B4513',
-        stone: '#708090', moss: '#2E8B57',
-        farmerShirt: '#F5F5DC', farmerPants: '#4682B4', hat: '#F4A460', skin: '#FFDAB9',
-        flowerPink: '#FF69B4', flowerWhite: '#FFFFFF', flowerYellow: '#FFD700',
-        wood: '#8B4513', roof: '#CD5C5C', sheep: '#F8F8FF'
+    // --- 1. 星露谷低饱和度温馨调色板 ---
+    const C = {
+        skyTop: '#9ac2d1', skyBot: '#e4e2c7',
+        hillBack: '#8cb07a', hillFront: '#6e985c',
+        dirt: '#9c734e', dirtDark: '#785637', grass: '#80b85d', path: '#b59e6c',
+        stone: '#7a8287', stoneLight: '#949ea3', moss: '#558249',
+        wood: '#855e42', woodDark: '#5c3e29', roof: '#bd5b5b',
+        shirt: '#8bb5ba', pants: '#755841', hat: '#e0c279', skin: '#f5d6b3',
+        flowerBlue: '#5e9bc9', flowerPink: '#e3849e', pumpkin: '#e3883b'
     };
 
-    const PHYSICS = {
-        pushForce: 0.0025, // 推动力量 (温和)
-        gravity: 0.0012,   // 下滑重力 (小于推力)
-        rollbackSpeed: 0.03// 登顶后滚落速度
+    // --- 2. 调优后的田园物理参数 ---
+    const PHY = {
+        pushAcc: 0.0009,    // 极轻柔的推力加速度
+        gravAcc: 0.00075,   // 略小于推力的重力
+        friction: 0.92,     // 阻尼，让移动有肉感
+        maxSpeed: 0.012     // 最大速度限制
     };
 
-    // 坡道坐标定点
-    const P0 = { x: 80, y: 300 }; // 山脚
-    const P1 = { x: 520, y: 120 }; // 山顶
+    // 地形关键点
+    const P0 = { x: 150, y: 380 }; // 山脚
+    const P1 = { x: 650, y: 150 }; // 山顶
     const SLOPE_LEN = Math.hypot(P1.x - P0.x, P1.y - P0.y);
+    const SLOPE_ANGLE = Math.atan2(P1.y - P0.y, P1.x - P0.x);
 
-    // --- 3. 游戏状态 ---
+    // --- 3. 游戏全局状态 ---
     let state = {
-        progress: 0, // 0 到 1
-        score: 0,
-        isPushing: false,
-        phase: 'playing', // playing, winning, resetting
-        timeTick: 0
+        progress: 0, v: 0, score: 0,
+        isPushing: false, phase: 'playing', // playing, winning, resetting
+        tick: 0, dayTime: 0
     };
 
     let particles = [];
-    let birds = [];
+    let inputs = { push: false };
 
-    // 输入监听
-    let inputHold = false;
-    window.addEventListener('keydown', e => { if(e.key==='w'||e.key==='W'||e.key==='ArrowUp') inputHold = true; });
-    window.addEventListener('keyup', e => { if(e.key==='w'||e.key==='W'||e.key==='ArrowUp') inputHold = false; });
-    window.addEventListener('mousedown', () => inputHold = true);
-    window.addEventListener('mouseup', () => inputHold = false);
-    window.addEventListener('touchstart', () => inputHold = true);
-    window.addEventListener('touchend', () => inputHold = false);
+    window.addEventListener('keydown', e => { if(['w','W','ArrowUp'].includes(e.key)) inputs.push = true; });
+    window.addEventListener('keyup', e => { if(['w','W','ArrowUp'].includes(e.key)) inputs.push = false; });
+    window.addEventListener('mousedown', () => inputs.push = true);
+    window.addEventListener('mouseup', () => inputs.push = false);
+    window.addEventListener('touchstart', () => inputs.push = true);
+    window.addEventListener('touchend', () => inputs.push = false);
 
-    // --- 4. 绘图辅助函数 (像素级作画) ---
-    function fillRect(x, y, w, h, color) { bctx.fillStyle = color; bctx.fillRect(Math.floor(x), Math.floor(y), Math.floor(w), Math.floor(h)); }
-    function fillCircle(cx, cy, r, color) {
-        bctx.fillStyle = color;
-        bctx.beginPath(); bctx.arc(cx, cy, r, 0, Math.PI * 2); bctx.fill();
-    }
-    // 依据进度获取斜坡上的位置
+    // --- 4. 绘图辅助系统 ---
     function getPos(t) { return { x: P0.x + (P1.x - P0.x)*t, y: P0.y + (P1.y - P0.y)*t }; }
+    function fillRect(x, y, w, h, color) { bctx.fillStyle = color; bctx.fillRect(Math.round(x), Math.round(y), w, h); }
+    function fillCircle(cx, cy, r, color) { bctx.fillStyle = color; bctx.beginPath(); bctx.arc(cx, cy, r, 0, Math.PI*2); bctx.fill(); }
 
-    // --- 5. 粒子系统 ---
+    // --- 5. 粒子特效引擎 ---
     function spawnParticle(x, y, type) {
-        let p = { x: x, y: y, vx: (Math.random()-0.5)*2, vy: (Math.random()-0.5)*2, life: 1, type: type };
-        if(type === 'petal') { p.vy = Math.random()*0.5 + 0.2; p.color = COLORS.flowerPink; }
-        if(type === 'sweat') { p.vy = 1; p.vx = 0; p.color = '#00BFFF'; }
-        if(type === 'grass') { p.vy = -Math.random()*2; p.color = COLORS.hillFront; }
-        if(type === 'grasshopper') { p.vy = -2 - Math.random()*2; p.vx = (Math.random()-0.5)*3; p.color = '#32CD32'; p.life=1.5; }
-        if(type === 'note') { p.vy = -1; p.color = '#000'; p.life=2; }
+        if(particles.length > 80) return; // 限制粒子数量保性能
+        let p = { x, y, vx: (Math.random()-0.5)*2, vy: (Math.random()-0.5)*2, life: 1, maxLife: 1, type };
+        if(type === 'petal') { p.vy = Math.random()*1 + 0.5; p.vx = -1 - Math.random(); p.color = C.flowerPink; p.maxLife = 2; }
+        if(type === 'grass') { p.vy = -Math.random()*2; p.vx = -Math.random()*1; p.color = C.moss; p.maxLife = 0.5; }
+        if(type === 'dirt')  { p.vy = -0.5; p.vx = Math.random(); p.color = C.dirtDark; p.maxLife = 0.3; }
+        if(type === 'smoke') { p.vy = -1; p.vx = 0.5; p.color = 'rgba(200,200,200,0.5)'; p.maxLife = 1.5; }
+        if(type === 'bird')  { p.vx = -2; p.vy = Math.sin(state.tick*0.1); p.color = '#333'; p.maxLife = 5; }
+        p.life = p.maxLife;
         particles.push(p);
     }
 
-    // --- 6. 场景渲染核心 ---
-    function drawSky() {
-        let cycle = Math.floor(state.score / 5); // 每5分变一次天色
-        let topC = COLORS.skyTop, botC = COLORS.skyBot;
-        if (cycle % 3 === 1) { topC = '#FF7F50'; botC = '#FFD700'; } // 黄昏
-        if (cycle % 3 === 2) { topC = '#0B0B2A'; botC = '#2F4F4F'; } // 夜晚
+    // --- 6. 场景渲染：远景与斜坡 ---
+    function drawEnvironment() {
+        // 天空与云
+        let grad = bctx.createLinearGradient(0, 0, 0, VH);
+        grad.addColorStop(0, C.skyTop); grad.addColorStop(1, C.skyBot);
+        bctx.fillStyle = grad; bctx.fillRect(0, 0, VW, VH);
 
-        let grad = bctx.createLinearGradient(0, 0, 0, buffer.height);
-        grad.addColorStop(0, topC); grad.addColorStop(1, botC);
-        bctx.fillStyle = grad; bctx.fillRect(0, 0, buffer.width, buffer.height);
-
-        // 云朵或星星
-        bctx.fillStyle = (cycle % 3 === 2) ? '#FFF' : 'rgba(255,255,255,0.6)';
-        for(let i=0; i<10; i++) {
-            let cx = (state.timeTick*0.2 + i*80) % (buffer.width+100) - 50;
-            if (cycle % 3 === 2) fillRect(cx, 20 + i*15, 2, 2, '#FFF'); // 星星
-            else { fillRect(cx, 40+i*10, 40, 10, '#FFF'); fillRect(cx+10, 30+i*10, 20, 10, '#FFF'); } // 云朵
+        bctx.fillStyle = 'rgba(255,255,255,0.7)';
+        for(let i=0; i<5; i++) {
+            let cx = (state.tick * 0.1 + i*150) % (VW + 200) - 100;
+            fillCircle(cx, 50 + i*15, 20, 'rgba(255,255,255,0.7)');
+            fillCircle(cx+20, 50 + i*15 + 5, 15, 'rgba(255,255,255,0.7)');
+            fillCircle(cx-15, 50 + i*15 + 5, 15, 'rgba(255,255,255,0.7)');
         }
-    }
 
-    function drawScenery() {
         // 远山
-        fillCircle(200, 350, 150, COLORS.hillBack);
-        fillCircle(500, 350, 180, COLORS.hillBack);
-        
-        // 斜坡地基
-        bctx.fillStyle = COLORS.slopeDirt;
-        bctx.beginPath(); bctx.moveTo(P0.x-50, buffer.height); bctx.lineTo(P0.x-50, P0.y+20);
-        bctx.lineTo(P1.x+50, P1.y+20); bctx.lineTo(buffer.width, buffer.height); bctx.fill();
-        
-        // 草地表层
-        bctx.strokeStyle = COLORS.slope; bctx.lineWidth = 15; bctx.lineCap = 'round';
-        bctx.beginPath(); bctx.moveTo(P0.x-40, P0.y+10); bctx.lineTo(P1.x+40, P1.y+10); bctx.stroke();
+        fillCircle(200, 400, 250, C.hillBack); fillCircle(600, 400, 300, C.hillBack);
 
-        // 沿途小花
-        for(let i=0.1; i<0.9; i+=0.15) {
-            let p = getPos(i);
-            fillRect(p.x, p.y+15, 3, 6, COLORS.slope); // 茎
-            fillRect(p.x-2, p.y+13, 7, 4, i%2==0?COLORS.flowerWhite:COLORS.flowerYellow);
-        }
-
-        // 山脚农舍与羊
-        fillRect(20, 260, 40, 30, '#FFF'); // 墙
-        bctx.fillStyle = COLORS.roof; bctx.beginPath(); bctx.moveTo(15,260); bctx.lineTo(40,240); bctx.lineTo(65,260); bctx.fill(); // 顶
-        fillRect(35, 275, 10, 15, COLORS.wood); // 门
-        // 像素羊
-        fillRect(70, 280, 12, 8, COLORS.sheep); fillRect(80, 278, 4, 4, '#333'); fillRect(72, 288, 2, 4, '#333'); fillRect(78, 288, 2, 4, '#333');
-        if(state.timeTick % 300 < 60) fillRect(85, 270, 10, 6, '#FFF'); // 偶尔咩一下气泡
-
-        // 山顶大树与长椅
-        fillRect(P1.x+20, P1.y-40, 10, 50, COLORS.wood); // 树干
-        fillCircle(P1.x+25, P1.y-50, 25, COLORS.hillFront); fillCircle(P1.x+10, P1.y-40, 20, COLORS.hillBack); fillCircle(P1.x+40, P1.y-35, 20, COLORS.hillFront); // 树冠
-        // 长椅
-        fillRect(P1.x-15, P1.y+5, 20, 4, COLORS.wood); fillRect(P1.x-10, P1.y+9, 2, 6, '#333'); fillRect(P1.x, P1.y+9, 2, 6, '#333');
-    }
-
-    // --- 7. 角色与巨石渲染 ---
-    function drawActor() {
-        let pos = getPos(state.progress);
-        let angle = state.progress * Math.PI * 8; // 石头滚动角度
-
-        // 1. 画巨石 (带苔藓)
-        bctx.save();
-        bctx.translate(pos.x, pos.y);
-        bctx.rotate(angle);
-        fillCircle(0, 0, 18, COLORS.stone);
-        fillCircle(-8, -5, 6, COLORS.moss); fillCircle(10, 4, 5, COLORS.moss); // 苔藓斑块
-        fillRect(-2, -15, 3, 3, COLORS.flowerPink); // 石头上的小花
+        // 远景风车 (剪影)
+        let wx = 650, wy = 120;
+        fillRect(wx-5, wy, 10, 30, '#59704e');
+        bctx.save(); bctx.translate(wx, wy); bctx.rotate(state.tick * 0.02);
+        fillRect(-2, -20, 4, 40, '#59704e'); fillRect(-20, -2, 40, 4, '#59704e');
         bctx.restore();
 
-        // 2. 画西西弗斯 (农夫装扮)
-        let sx = pos.x - 22; let sy = pos.y + 12; 
-        let bounce = state.isPushing ? Math.sin(state.timeTick*0.5)*2 : 0; // 劳作时的身体律动
+        // --- 多层斜坡绘制 ---
+        // 1. 泥土基底
+        bctx.fillStyle = C.dirt;
+        bctx.beginPath(); bctx.moveTo(P0.x-100, VH); bctx.lineTo(P0.x-100, P0.y+20);
+        bctx.lineTo(P1.x+150, P1.y+20); bctx.lineTo(VW, VH); bctx.fill();
 
-        // 身体
-        fillRect(sx, sy - 15 + bounce, 10, 12, COLORS.farmerShirt); // 衬衫
-        fillRect(sx, sy - 3 + bounce, 10, 8, COLORS.farmerPants); // 背带裤
-        fillRect(sx+2, sy - 10 + bounce, 2, 8, COLORS.farmerPants); // 背带
+        // 2. 泥土与草地边缘纹理 (锯齿感)
+        bctx.fillStyle = C.dirtDark;
+        for(let i=0; i<1; i+=0.02) { let p = getPos(i); fillRect(p.x, p.y+25, 16, 16, C.dirtDark); }
 
-        // 腿
-        if(state.isPushing && state.timeTick%20 < 10) {
-            fillRect(sx+2, sy+5+bounce, 3, 8, COLORS.skin); fillRect(sx-3, sy+5+bounce, 3, 6, COLORS.skin);
-        } else {
-            fillRect(sx, sy+5+bounce, 3, 8, COLORS.skin); fillRect(sx+6, sy+5+bounce, 3, 8, COLORS.skin);
+        // 3. 浅色泥路 (车辙/推石痕迹)
+        bctx.strokeStyle = C.path; bctx.lineWidth = 45; bctx.lineCap = 'round';
+        bctx.beginPath(); bctx.moveTo(P0.x-60, P0.y+10); bctx.lineTo(P1.x+60, P1.y+10); bctx.stroke();
+
+        // 4. 绿草覆盖
+        bctx.strokeStyle = C.grass; bctx.lineWidth = 15; bctx.lineCap = 'round';
+        bctx.beginPath(); bctx.moveTo(P0.x-80, P0.y); bctx.lineTo(P1.x+80, P1.y); bctx.stroke();
+        bctx.strokeStyle = C.hillFront; bctx.lineWidth = 8;
+        bctx.beginPath(); bctx.moveTo(P0.x-80, P0.y+6); bctx.lineTo(P1.x+80, P1.y+6); bctx.stroke();
+
+        // 5. 沿途装饰物 (栅栏、花、草)
+        for(let i=0.05; i<0.95; i+=0.1) {
+            let p = getPos(i);
+            // 摆动的草叶
+            let sway = Math.sin(state.tick*0.05 + i*10) * 3;
+            bctx.strokeStyle = C.moss; bctx.lineWidth = 2;
+            bctx.beginPath(); bctx.moveTo(p.x+sway, p.y-10); bctx.lineTo(p.x, p.y); bctx.stroke();
+            // 蓝色绣球花丛
+            if(i > 0.3 && i < 0.4) {
+                fillCircle(p.x-15, p.y+15, 8, C.flowerBlue); fillCircle(p.x-10, p.y+10, 6, '#4682b4');
+            }
         }
-
-        // 胳膊与头
-        fillRect(sx+5, sy-10+bounce, 12, 3, COLORS.skin); // 伸出的手
-        fillRect(sx+2, sy-22+bounce, 8, 8, COLORS.skin); // 头
-        fillRect(sx-2, sy-24+bounce, 14, 3, COLORS.hat); fillRect(sx+1, sy-28+bounce, 10, 4, COLORS.hat); // 草帽
-        fillRect(sx+10, sy-20+bounce, 2, 2, '#333'); // 微笑的眼睛
-        fillRect(sx+12, sy-16+bounce, 2, 1, '#333'); // 微笑的嘴
-
-        // 推石特效
-        if(state.isPushing && Math.random()>0.8) spawnParticle(pos.x, pos.y+15, 'grass');
-        if(state.isPushing && Math.random()>0.95) spawnParticle(sx, sy-20, 'sweat');
-        if(state.isPushing && state.timeTick%60 === 0) bctx.fillText("🌾", sx-10, sy-30); // 田园意志符文
     }
 
-    function drawScore() {
+    // --- 7. 山脚与山顶建筑群 ---
+    function drawBuildings() {
+        // 【山脚：小木屋与南瓜田】
+        let hx = 40, hy = 320;
+        // 烟囱与炊烟
+        fillRect(hx+40, hy-40, 8, 20, '#555');
+        if(state.tick % 15 === 0) spawnParticle(hx+44, hy-40, 'smoke');
+        // 房子本体
+        fillRect(hx, hy-20, 60, 45, '#e8d5b7'); // 墙壁
+        fillRect(hx+20, hy+5, 15, 20, C.wood); // 门
+        fillRect(hx+40, hy-5, 12, 12, '#87CEEB'); // 窗户
+        bctx.fillStyle = C.roof; bctx.beginPath(); bctx.moveTo(hx-10, hy-20); bctx.lineTo(hx+30, hy-50); bctx.lineTo(hx+70, hy-20); bctx.fill();
+        // 邮箱与看板 (分数计分板)
+        fillRect(hx+80, hy+10, 4, 15, C.wood); fillRect(hx+75, hy+5, 14, 10, C.woodDark);
+        
+        // 农田与南瓜
+        fillRect(hx-30, hy+25, 40, 10, C.dirtDark);
+        fillCircle(hx-20, hy+23, 6, C.pumpkin); fillRect(hx-20, hy+15, 2, 3, C.moss);
+        fillCircle(hx-10, hy+26, 5, C.pumpkin);
+        
+        // 像素狗 (如果正在推或者赢了，狗尾巴会摇/站起来)
+        let dogAct = (state.isPushing || state.phase==='winning') ? Math.sin(state.tick*0.3)*2 : 0;
+        fillRect(hx+50, hy+20, 16, 8, '#d2b48c'); // 身体
+        fillRect(hx+62, hy+14-dogAct*0.5, 8, 8, '#d2b48c'); // 头
+        fillRect(hx+65, hy+14-dogAct*0.5, 4, 4, '#8b4513'); // 耳朵
+        bctx.strokeStyle = '#8b4513'; bctx.lineWidth=2; bctx.beginPath(); bctx.moveTo(hx+50, hy+22); bctx.lineTo(hx+45, hy+20 - dogAct*2); bctx.stroke(); // 尾巴
+
+        // 【山顶：老橡树与长椅】
+        let tx = P1.x + 50, ty = P1.y - 20;
+        fillRect(tx-10, ty-80, 20, 80, C.woodDark); // 粗壮树干
+        // 巨大的层次感树冠
+        fillCircle(tx, ty-90, 50, C.hillBack);
+        fillCircle(tx-30, ty-70, 40, C.moss); fillCircle(tx+30, ty-80, 45, C.hillFront);
+        fillCircle(tx, ty-120, 45, C.hillFront);
+        // 树下长椅与野餐篮
+        fillRect(tx-50, ty-10, 30, 4, C.wood); fillRect(tx-45, ty-6, 3, 10, '#333'); fillRect(tx-25, ty-6, 3, 10, '#333');
+        fillRect(tx+20, ty-5, 12, 8, '#c29b67'); fillRect(tx+20, ty-7, 12, 3, '#ff4d4d'); // 野餐篮
+
+        // UI：山脚看板上画橡果（分数）
         for(let i=0; i<state.score; i++) {
-            let fx = 20 + (i%15)*20; let fy = 20 + Math.floor(i/15)*20;
-            fillRect(fx, fy, 8, 8, COLORS.flowerPink); fillRect(fx+2, fy+2, 4, 4, COLORS.flowerWhite);
+            let acX = hx + 76 + (i%3)*4; let acY = hy + 6 + Math.floor(i/3)*4;
+            fillRect(acX, acY, 2, 2, '#ffcc00');
         }
     }
 
-    // --- 8. 主逻辑循环 ---
-    function update() {
-        state.timeTick++;
+    // --- 8. 角色动画与推石渲染 ---
+    function drawActor() {
+        let pos = getPos(state.progress);
+        
+        // 1. 巨石渲染 (椭圆+苔藓+藤蔓)
+        bctx.save();
+        bctx.translate(pos.x, pos.y - 12);
+        bctx.rotate(state.progress * Math.PI * 4); // 滚动旋转
+        
+        // 石头本体 (带高光)
+        bctx.fillStyle = C.stone;
+        bctx.beginPath(); bctx.ellipse(0, 0, 18, 16, 0, 0, Math.PI*2); bctx.fill();
+        bctx.fillStyle = C.stoneLight;
+        bctx.beginPath(); bctx.ellipse(3, -3, 10, 8, 0, 0, Math.PI*2); bctx.fill();
+        
+        // 苔藓和野花
+        fillCircle(-8, 6, 5, C.moss); fillCircle(10, -5, 6, C.moss);
+        fillRect(-9, 5, 3, 3, C.flowerWhite); fillRect(11, -6, 3, 3, C.flowerPink);
+        
+        // 摇摆的藤蔓
+        bctx.strokeStyle = C.moss; bctx.lineWidth = 2;
+        let vineSway = state.isPushing ? Math.sin(state.tick*0.2)*3 : 0;
+        bctx.beginPath(); bctx.moveTo(0, -16); bctx.quadraticCurveTo(5+vineSway, -5, 2+vineSway, 10); bctx.stroke();
+        bctx.restore();
 
-        // 逻辑更新
+        // 2. 西西弗斯 (农夫) 动画
+        let sx = pos.x - 30; let sy = pos.y - 15;
+        // 动画帧判定
+        let frame = 0; // 0,1,2,3
         if (state.phase === 'playing') {
-            state.isPushing = inputHold;
-            if (state.isPushing) state.progress += PHYSICS.pushForce;
-            else if (state.progress > 0) state.progress -= PHYSICS.gravity;
+            if (state.isPushing) frame = Math.floor(state.tick / 8) % 4; // 推石步频
+            else if (state.progress > 0) frame = Math.floor(state.tick / 6) % 2; // 后退滑步
+        }
+        if (state.phase === 'winning') frame = 4; // 欢呼
 
+        let lean = state.isPushing ? 5 : 0; // 身体前倾偏移量
+        
+        // 后腿
+        bctx.fillStyle = C.pants;
+        if(frame===0 || frame===2) { fillRect(sx-8+lean, sy+15, 6, 12, C.pants); } // 站立
+        else if(frame===1) { fillRect(sx-12+lean, sy+12, 6, 12, C.pants); } // 后蹬
+        else { fillRect(sx-4+lean, sy+15, 6, 12, C.pants); }
+
+        // 身体 (衬衫与背带)
+        fillRect(sx-10+lean, sy, 14, 18, C.shirt);
+        fillRect(sx-6+lean, sy, 4, 18, C.pants); // 背带
+
+        // 前腿
+        if(frame===0 || frame===2) { fillRect(sx-2+lean, sy+15, 6, 12, C.pants); }
+        else if(frame===1) { fillRect(sx+2+lean, sy+12, 6, 12, C.pants); } // 前迈
+        else { fillRect(sx-8+lean, sy+15, 6, 12, C.pants); }
+
+        // 胳膊
+        bctx.strokeStyle = C.skin; bctx.lineWidth = 4; bctx.lineCap = 'round';
+        bctx.beginPath(); bctx.moveTo(sx-4+lean, sy+5);
+        if(state.phase === 'winning') {
+            bctx.lineTo(sx-4, sy-15); // 举手欢呼
+        } else {
+            // 随帧伸缩的手臂
+            let reach = (frame===1||frame===3) ? 15 : 10;
+            bctx.lineTo(sx-4+lean + reach, sy+5);
+        }
+        bctx.stroke();
+
+        // 头部与草帽
+        fillRect(sx-8+lean, sy-12, 10, 10, C.skin); // 脸
+        fillRect(sx-2+lean, sy-8, 2, 2, '#333'); // 眼睛
+        
+        let hatY = state.phase === 'winning' ? sy-30 - Math.sin(state.tick*0.1)*10 : sy-15; // 欢呼时帽子飞起
+        fillRect(sx-14+lean, hatY, 22, 4, C.hat); // 帽檐
+        fillRect(sx-10+lean, hatY-6, 14, 6, C.hat); // 帽顶
+        fillRect(sx-8+lean, hatY-4, 3, 3, C.flowerYellow); // 帽上的小花
+
+        // --- 推石特效与 UI 提示 ---
+        if(state.isPushing) {
+            if(Math.random()>0.7) spawnParticle(pos.x-10, pos.y+5, 'grass');
+            if(Math.random()>0.9) spawnParticle(pos.x, pos.y+10, 'dirt');
+        } else if (state.progress > 0 && state.phase === 'playing') {
+            if(Math.random()>0.5) spawnParticle(sx, sy+25, 'dirt'); // 滑步摩擦的灰尘
+        }
+    }
+
+    // --- 9. 主逻辑与游戏流转 ---
+    function updatePhysics() {
+        if (state.phase === 'playing') {
+            // 核心推石物理
+            if (inputs.push) {
+                state.v += PHY.pushAcc;
+                state.isPushing = true;
+            } else {
+                state.v -= PHY.gravAcc;
+                state.isPushing = false;
+            }
+
+            state.v *= PHY.friction; // 阻尼
+            if (state.v > PHY.maxSpeed) state.v = PHY.maxSpeed;
+            if (state.v < -PHY.maxSpeed) state.v = -PHY.maxSpeed;
+            
+            state.progress += state.v;
+
+            if (state.progress < 0) { state.progress = 0; state.v = 0; }
+            
+            // 登顶胜利触发
             if (state.progress >= 1.0) {
-                state.progress = 1.0;
-                state.phase = 'winning';
-                state.score++;
-                document.getElementById('quote-text').innerText = "繁花落尽，归于尘土。准备新一轮的耕耘。";
-                // 触发胜利花瓣与小鸟
-                for(let i=0; i<30; i++) spawnParticle(P1.x + Math.random()*40, P1.y - 40 - Math.random()*20, 'petal');
-                spawnParticle(P1.x, P1.y-20, 'note');
-                setTimeout(() => { state.phase = 'resetting'; }, 2000); // 顶峰停留 2 秒享受禅意
+                state.progress = 1.0; state.v = 0; state.isPushing = false;
+                state.phase = 'winning'; state.score++;
+                
+                // 爆花瓣特效
+                for(let i=0; i<40; i++) spawnParticle(P1.x + 20 + (Math.random()-0.5)*100, P1.y - 100 + Math.random()*50, 'petal');
+                
+                // 提示语变化
+                let quotes = ["一次丰收的喜悦。", "山顶的风很温柔。", "石头沉重，但花香依旧。", "农夫的西西弗斯之舞。"];
+                document.getElementById('quote-text').innerText = quotes[Math.floor(Math.random()*quotes.length)];
+
+                // 停留1.5秒后重置
+                setTimeout(() => { state.phase = 'resetting'; }, 1500);
             }
         } 
         else if (state.phase === 'resetting') {
-            state.progress -= PHYSICS.rollbackSpeed;
-            if(Math.random()>0.5) spawnParticle(getPos(state.progress).x, getPos(state.progress).y, 'grass');
+            // 快速滚落效果 (模糊拖尾)
+            state.progress -= 0.05;
+            spawnParticle(getPos(state.progress).x, getPos(state.progress).y, 'grass');
             if (state.progress <= 0) {
-                state.progress = 0;
-                state.phase = 'playing';
-                document.getElementById('quote-text').innerText = "石头会落下，但野花年年开。";
-                // 惊起草丛蚂蚱
-                for(let i=0; i<5; i++) spawnParticle(P0.x + Math.random()*30, P0.y+10, 'grasshopper');
+                state.progress = 0; state.phase = 'playing';
+                document.getElementById('quote-text').innerText = "清理土壤，准备新一轮的耕耘。";
+                // 惊起飞鸟
+                for(let i=0; i<3; i++) spawnParticle(P0.x + 50 + Math.random()*30, P0.y - 20, 'bird');
             }
         }
 
-        // 粒子更新
+        // 更新粒子
         for(let i=particles.length-1; i>=0; i--) {
             let p = particles[i];
-            p.x += p.vx; p.y += p.vy; p.life -= 0.02;
-            if(p.type==='grasshopper') p.vy += 0.1; // 重力
+            p.x += p.vx; p.y += p.vy;
+            p.life -= 0.02;
             if(p.life <= 0) particles.splice(i, 1);
         }
     }
 
     function draw() {
-        bctx.clearRect(0, 0, buffer.width, buffer.height);
-        
-        drawSky();
-        drawScenery();
-        
-        // 画粒子(在人物后)
-        particles.forEach(p => { 
-            if(p.type === 'note') { bctx.fillStyle='#000'; bctx.fillText("♪", p.x, p.y); }
-            else fillRect(p.x, p.y, p.type==='petal'?4:2, p.type==='petal'?4:2, p.color); 
+        state.tick++;
+        updatePhysics();
+
+        // 清空离屏缓冲
+        bctx.clearRect(0, 0, VW, VH);
+
+        drawEnvironment();
+        drawBuildings();
+        drawActor();
+
+        // 画粒子 (叠加在最上层)
+        particles.forEach(p => {
+            bctx.globalAlpha = p.life / p.maxLife;
+            if (p.type === 'bird') { bctx.fillStyle = p.color; bctx.fillText('v', p.x, p.y); }
+            else fillRect(p.x, p.y, p.type==='petal'?4:2, p.type==='petal'?4:2, p.color);
+            bctx.globalAlpha = 1;
         });
 
-        drawActor();
-        drawScore();
-
-        // 将低分辨率缓冲区放大绘制到屏幕 Canvas 上，形成硬核像素风
+        // 离屏渲染投射到主屏幕 (拉伸并保持像素锐度)
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(buffer, 0, 0, canvas.width, canvas.height);
-    }
 
-    function loop() {
-        update();
-        draw();
-        requestAnimationFrame(loop);
+        requestAnimationFrame(draw);
     }
-    loop();
-
+    draw(); // 启动循环
 </script>
 </body>
 </html>
